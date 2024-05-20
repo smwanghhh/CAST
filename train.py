@@ -39,7 +39,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data1', type=str, default='rafdb', help='source data')
     parser.add_argument('--data2', type=str, default='fer', help='target data.')
-    parser.add_argument('--idx', type=int, default=0, help='10-folder cross validation')
+    parser.add_argument('--idx', type=int, default=3, help='10-folder cross validation')
     parser.add_argument('-c', '--checkpoint', type=str, default= None,
                         help='load model')  
     parser.add_argument('--backbone', type=str, default='resnet18', help='Backobone, resnet18, resnet50 or mobilenet_v2.')
@@ -47,8 +47,8 @@ def parse_args():
     parser.add_argument('--workers', default=10, type=int, help='Number of data loading workers (default: 10)')
     parser.add_argument('--epochs', type=int, default=30, help='Total training epochs.')
     parser.add_argument('--w1', type=float, default=4, help='classification loss weight')
-    parser.add_argument('--w2', type=float, default=1, help='affinity loss weight')
-    parser.add_argument('--w3', type=float, default=1, help='weight loss weight')
+    parser.add_argument('--w2', type=float, default=0.3, help='affinity loss weight')
+    parser.add_argument('--w3', type=float, default=0.1, help='weight loss weight')
     parser.add_argument('--phi', type=float, default=1.4, help='weight loss weight')
     return parser.parse_args()
 
@@ -184,11 +184,10 @@ def run_training():
     best_acc = 0.
     for i in range(0, pre_epochs):
         train_loss1, train_loss2, train_loss3 = 0.0, 0.0, 0.0
-        count1, count2 = 0, 0
+        count = 0
         model.train()
         bingo_cnt = 0.
         for batch_i, (imgs, _, targets) in enumerate(train_loader_source):
-            count1 += 1
             imgs = imgs.cuda()
             targets = targets.cuda()
             output = model(imgs, targets, None, 'train', 'source')
@@ -200,13 +199,9 @@ def run_training():
             fc_weight_norm_ = fc_weight_norm.mm(torch.transpose(fc_weight_norm, 1, 0))
             weight_loss = torch.mean(((fc_weight_ / fc_weight_norm_ -  torch.eye(fc_weight.shape[0]).cuda()) + 1) / 2)
 
-            if len(output) > 1:
-                aff_loss = output[1]
-                loss = cls_loss * args.w1 + aff_loss * args.w2 + weight_loss * args.w3    
-                train_loss2 += aff_loss
-                count2 += 1
-            else:
-                loss = cls_loss * args.w1 + weight_loss * args.w3
+            aff_loss = output[1]
+            loss = cls_loss * args.w1 #+ aff_loss * args.w2 + weight_loss * args.w3    
+            train_loss2 += aff_loss
 
             loss.backward()
             optimizer.step()
@@ -217,12 +212,12 @@ def run_training():
             train_loss1 += cls_loss
             train_loss3 += weight_loss
             optimizer.zero_grad()
-
-        train_acc = bingo_cnt / (count1 * train_batch) if count1 !=0 else 0
+        count += 1
+        train_acc = bingo_cnt / (count * train_batch)
         train_acc = np.around(train_acc, 4)
-        train_loss1 = train_loss1 / count1 if count1 != 0 else 0
-        train_loss2 = train_loss2 / count2 if count2 != 0 else 0
-        train_loss3 = train_loss3 / count1 if count1 != 0 else 0
+        train_loss1 = train_loss1 / count
+        train_loss2 = train_loss2 / count
+        train_loss3 = train_loss3 / count
         
         print('[Epoch %d] Training accuracy: %.4f.   Classification Loss: %.3f   Affinity Loss: %.3f  Weight Loss: %.3f  LR: %.6f' %
                   (i, train_acc, train_loss1, train_loss2, train_loss3, optimizer.param_groups[0]["lr"]))
@@ -236,7 +231,7 @@ def run_training():
 
     for i in range(0, args.epochs):
         train_loss1, train_loss2 = 0, 0
-        count1, count2 = 0, 0
+        count = 0
         confident_num = 0
 
         for batch_i, (imgs, imgs_aug, gt_target) in enumerate(train_loader_target):
@@ -245,8 +240,6 @@ def run_training():
             except:
                 source_train_iter = iter(train_loader_source)
                 source_imgs, _, source_targets = next(source_train_iter)
-                
-            count1 += 2
             model.eval()
             ####forward the model get pseudo labels
             with torch.no_grad():
@@ -257,15 +250,9 @@ def run_training():
             model.train()
             source_con_idx = torch.ones(source_imgs.shape[0])
             ###cmbine the source and target batch
-            train_imgs = torch.cat((source_imgs, imgs_aug), 0)
-            train_targets = torch.cat((source_targets, targets), 0)
-            train_con_idx = torch.cat((source_con_idx, con_idx), 0)
-
-
-            shuffle_index = torch.randperm(train_imgs.shape[0])
-            train_imgs = train_imgs[shuffle_index].cuda()
-            train_targets = train_targets[shuffle_index].cuda()
-            train_con_idx = train_con_idx[shuffle_index].cuda()
+            train_imgs = torch.cat((source_imgs, imgs_aug), 0).cuda()
+            train_targets = torch.cat((source_targets, targets), 0).cuda()
+            train_con_idx = torch.cat((source_con_idx, con_idx), 0).cuda()
 
             output = model(train_imgs, train_targets, train_con_idx, 'train', 'target')
             ##classification _loss
@@ -277,27 +264,21 @@ def run_training():
             fc_weight_norm_ = fc_weight_norm.mm(torch.transpose(fc_weight_norm, 1, 0))
             weight_loss = torch.mean(((fc_weight_ / fc_weight_norm_ -  torch.eye(fc_weight.shape[0]).cuda()) + 1) / 2)
 
-            if len(output) > 1:
-                aff_loss = output[1]
-                loss = cls_loss * args.w1 + aff_loss * args.w2 + weight_loss * args.w3
-                train_loss2 += aff_loss
-                count2 += 1
-            else:
-                loss = cls_loss * args.w1 + weight_loss * args.w3
-
+            aff_loss = output[1]
+            loss = cls_loss * args.w1 + aff_loss * args.w2 + weight_loss * args.w3 
+            train_loss2 += aff_loss
             loss.backward()
             optimizer.step()
             train_loss1 += cls_loss
             optimizer.zero_grad()
-            
             try:
                 confident_num += (con_idx != 0).nonzero().squeeze().shape[0]
             except:
                 confident_num = 0
-                
+        count += 1       
         scheduler.step()
-        train_loss1 = train_loss1 / count1 if count1 != 0 else 0
-        train_loss2 = train_loss2 / count2 if count2 != 0 else 0
+        train_loss1 = train_loss1 / count
+        train_loss2 = train_loss2 / count
 
         print('[Epoch %d]  Confident_Num: %d    Classification Loss: %.3f   Affinity Loss: %.3f   LR: %.6f' %
                   (i, confident_num, train_loss1, train_loss2, optimizer.param_groups[0]["lr"]))
