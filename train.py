@@ -59,7 +59,6 @@ def run_training():
     model_path = os.path.join('./models', args.data1 + '_' + args.data2)
     if not os.path.exists(model_path):
         os.makedirs(model_path)
-    figsize = [10, 10]
 
     print('---------------------------------------------------------------------------------------')
     print('Training %s with source data %s and target data %s, idx %s:'%(args.backbone, args.data1, args.data2, args.idx))
@@ -72,12 +71,12 @@ def run_training():
         pre_epochs = 30
         
     elif args.backbone == 'resnet50':
-        train_batch = 50
+        train_batch = 128
         test_batch = 100
         pre_epochs = 30
         
     elif args.backbone == 'mobilenet_v2':
-        train_batch = 64
+        train_batch = 128
         test_batch = 128
         pre_epochs = 30
 
@@ -172,7 +171,7 @@ def run_training():
         checkpoint = torch.load(args.checkpoint)
         model.load_state_dict(checkpoint['model'], strict=True)
 
-    param = model.parameters()#list(model.feature.parameters()) + list(model.fc.parameters())
+    param = model.parameters()
     optimizer = torch.optim.Adam(param, args.lr, weight_decay=1e-4)
 
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
@@ -200,7 +199,7 @@ def run_training():
             weight_loss = torch.mean(((fc_weight_ / fc_weight_norm_ -  torch.eye(fc_weight.shape[0]).cuda()) + 1) / 2)
 
             aff_loss = output[1]
-            loss = cls_loss * args.w1 #+ aff_loss * args.w2 + weight_loss * args.w3    
+            loss = cls_loss * args.w1 + aff_loss * args.w2 + weight_loss * args.w3    
             train_loss2 += aff_loss
 
             loss.backward()
@@ -227,7 +226,6 @@ def run_training():
     checkpoint = torch.load(os.path.join(model_path, args.backbone + '_' + args.data1 + '_' + args.data2 + '_' + str(best_acc) + ".pth"))
     model.load_state_dict(checkpoint['model'])
     optimizer.load_state_dict(checkpoint['optimizer'])
-    optimizer.param_groups[0]["lr"] = args.lr  * 0.09
 
     for i in range(0, args.epochs):
         train_loss1, train_loss2 = 0, 0

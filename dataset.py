@@ -92,7 +92,6 @@ class FER(data.Dataset):
         self.file_paths, self.label = [], []
         if self.phase == 'train':
             files = glob.glob(os.path.join(path, 'train/*/*.jpg'))
-            files += glob.glob(os.path.join(path, 'val/*/*.jpg'))
             seed = np.random.seed(2000)
             np.random.shuffle(files)
         else:

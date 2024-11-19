@@ -5,15 +5,58 @@ from torchvision import models
 import math
 import numpy as np
 from sklearn import svm
+import itertools
 from sklearn.neighbors import KernelDensity
 
 def cal_weight(x):
-    w = 1 / (x + 0.00001)
-   # w = (w - w.min())/(w.max() -　w.min()) + 1
+    w = 1 / x
+    w = np.exp(w) / np.sum(np.exp(w))
     return np.array(w)
 
+def mmd_loss(source_features, target_features):
+    num_samples = min(source_features.size(0), target_features.size(0))
+    matched_source = source_features[torch.randperm(source_features.size(0))[:num_samples]]
+    loss = 0.
+    for _ in range(6):
+        matched_target = target_features[torch.randperm(target_features.size(0))[:num_samples]]
+        
+        kernels = compute_kernel_matrix(matched_source, matched_target)
+        XX = kernels[:num_samples, :num_samples]
+        YY = kernels[num_samples:, num_samples:]
+        XY = kernels[:num_samples, num_samples:]
+        YX = kernels[num_samples:, :num_samples]
+        loss += torch.mean(XX + YY - XY -YX)    
+    return loss / 6
+
+def compute_kernel_matrix(source, target, kernel_mul=2.0, kernel_num=5):
+    n_samples = int(source.size()[0])+int(target.size()[0])
+    total = torch.cat([source, target], dim=0)
+    total0 = total.unsqueeze(0).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
+    total1 = total.unsqueeze(1).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
+    L2_distance = ((total0-total1)**2).sum(2)
+    # bandwidth=5
+    bandwidth = torch.sum(L2_distance.data) / (n_samples**2-n_samples) ##bandwidth=0.5
+    bandwidth /= (kernel_mul ** (kernel_num // 2))
+    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
+    kernel_val = [torch.exp(-L2_distance / bandwidth_temp) for bandwidth_temp in bandwidth_list]
+
+    return sum(kernel_val)#/len(kernel_val)
+
+def remove_element(matrix, index):
+    dim = matrix[0].shape[-1]
+    matrix1 = matrix[:index]
+    matrix2 = matrix[index+1:]
+    data = []
+    for item in matrix1:
+        data.extend(item)
+    for item in matrix2:
+        data.extend(item)
+    result = torch.cat(data, 0).reshape(-1, dim)
+    return result
+
+
 class Model(nn.Module):
-    def __init__(self, backbone='resnet18', num_classes=7, pretrained=True, drop_rate=0.0):
+    def __init__(self, backbone='resnet50', num_classes=7, pretrained=True, drop_rate=0.5):
         super(Model, self).__init__()
         self.drop_rate = drop_rate
         self.num_classes = num_classes
@@ -23,18 +66,19 @@ class Model(nn.Module):
         if backbone == 'resnet18':
             self.feature = nn.Sequential(*list(models.resnet18(pretrained).children())[:-1], nn.Flatten(), nn.Dropout(drop_rate))
             self.fc = nn.Linear(512, num_classes, bias = False)
+
         elif backbone == 'resnet50':
-            self.feature = nn.Sequential(*list(models.resnet50(pretrained).children())[:-1], nn.Flatten())#, nn.Dropout(drop_rate), nn.Linear(2048, 512))
-            self.fc = nn.Linear(2048, num_classes, bias = False)
+            self.feature = nn.Sequential(*list(models.resnet50(pretrained).children())[:-1], nn.Flatten(),  nn.Dropout(drop_rate), nn.Linear(2048, 512))
+            self.fc = nn.Linear(512, num_classes, bias = False)
 
         elif backbone == 'mobilenet_v2':
-            self.feature = nn.Sequential(*list(models.mobilenet_v2(pretrained).children())[:-1], nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Dropout(drop_rate), nn.Linear(1280, 512), nn.Dropout(drop_rate)) 
+            self.feature = nn.Sequential(*list(models.mobilenet_v2(pretrained).children())[:-1], nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Dropout(drop_rate), nn.Linear(1280, 512), nn.Dropout(drop_rate)) #62720  81920
             self.fc = nn.Linear(512, num_classes, bias = False)
 
         else:
             raise ValueError('Backbone Error!')
 
-    def forward(self, x, targets, idx, mode = 'train', task = 'source', epoch=0):
+    def forward(self, x, targets, idx, mode = 'train', task = 'target', epoch=0):
         fea = self.feature(x)
         out = self.bn(self.fc(fea))
         batch = fea.shape[0]
@@ -98,50 +142,8 @@ class Model(nn.Module):
                 self.kde.fit(f)
                 v = np.sum(1/(self.kde.score_samples(f)))
             else:
-                v = 0.00001
+                v = 0.000001
             volume[idx] = v
-        # volume = np.exp(volume) / np.sum(np.exp(volume))
         weight = cal_weight(volume)
         return weight
-    
-def mmd_loss(source_features, target_features):
-    # sigma =1.0 # MMD的高斯核宽度
-    num_samples = min(source_features.size(0), target_features.size(0))
-    matched_source = source_features[torch.randperm(source_features.size(0))[:num_samples]]
-    matched_target = target_features[torch.randperm(target_features.size(0))[:num_samples]]
-    
-    # 计算源域和目标域的核矩阵
-    kernels = compute_kernel_matrix(matched_source, matched_target)
-    XX = kernels[:num_samples, :num_samples]
-    YY = kernels[num_samples:, num_samples:]
-    XY = kernels[:num_samples, num_samples:]
-    YX = kernels[num_samples:, :num_samples]
-    loss = torch.mean(XX + YY - XY -YX)    
-    return loss
-
-def compute_kernel_matrix(source, target, kernel_mul=2.0, kernel_num=5):
-    n_samples = int(source.size()[0])+int(target.size()[0])
-    total = torch.cat([source, target], dim=0)
-    total0 = total.unsqueeze(0).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
-    total1 = total.unsqueeze(1).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
-    L2_distance = ((total0-total1)**2).sum(2)
-    bandwidth=5
-    # bandwidth = torch.sum(L2_distance.data) / (n_samples**2-n_samples) ##bandwidth=0.5
-    bandwidth /= kernel_mul ** (kernel_num // 2)
-    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
-    kernel_val = [torch.exp(-L2_distance / bandwidth_temp) for bandwidth_temp in bandwidth_list]
-
-    return sum(kernel_val)#/len(kernel_val)
-
-def remove_element(matrix, index):
-    dim = matrix[0].shape[-1]
-    matrix1 = matrix[:index]
-    matrix2 = matrix[index+1:]
-    data = []
-    for item in matrix1:
-        data.extend(item)
-    for item in matrix2:
-        data.extend(item)
-    result = torch.cat(data, 0).reshape(-1, dim)
-    return result
 
